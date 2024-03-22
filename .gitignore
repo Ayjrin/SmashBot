@@ -1,0 +1,19 @@
+## Constants + Keys 
+paths.py
+*.env
+backend_secrets.py
+
+
+## Personal
+garbo/
+
+## Python Grossness
+__pycache__/
+*.pyc
+
+## Dataset Ignore
+SmashBot-master/
+*.slp
+
+## Model Stuff
+*.pt
