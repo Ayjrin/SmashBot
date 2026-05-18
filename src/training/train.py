@@ -1,4 +1,4 @@
-import Utils.ab_makeData as abn
+from src.utils import ab_makeData as abn
 import peppi_py as pp
 
 
@@ -38,10 +38,10 @@ def inputStart(dfGood, dfBad):
    return dfGood.merge(dfBad.add_suffix(".enemy"), left_on='frameNumber', right_on='frameNumber.enemy')
 
 def customDFtoTensor(inputPath : str):
-    
+
     inputDF = pd.DataFrame(abn.make_pre_large(pp.read_slippi(inputPath)))
 
-    
+
     Player0 = inputDF[inputDF['Player']=='0'][enemySplitList]
     Player1 = inputDF[inputDF['Player']=='1'][enemySplitList]
 
@@ -61,12 +61,15 @@ class GamesDataSet(torch.utils.data.Dataset):
     ## part of init
     def filterGames(self):
         games = []
+        if not os.path.exists(self.games_folder):
+            print(f"Warning: Folder {self.games_folder} does not exist.")
+            return []
         for filename in os.listdir(self.games_folder):
             if self.characterFilter in filename:
                 games.append(filename)
         print("total games: " + str(len(games)))
         return games
-    
+
     def __getitem__(self, index):
         try:
             pathToGame = self.games_folder + r"\\" + self.games[index]
@@ -83,15 +86,17 @@ class GamesDataSet(torch.utils.data.Dataset):
             ## details hanlded in custon collate_fn
 
         return inputTensor, targetTensor
-    
+
     def __len__(self):
         return len(self.games)
-    
-        
+
+
 
 ## concatenating together for ease
 def collate_fn(batch):
     batch = list(filter(lambda x: x is not None, batch))
+    if not batch:
+        return None
 
     data = [item[0] for item in batch]
     data = torch.cat(data, dim=0)
@@ -119,19 +124,27 @@ class Net(nn.Module):
         x = F.sigmoid(self.fc5(x))
         x = self.fc6(x)
         return x
-    
 
 
-if __name__ == "__main__":
+def run_training():
     ## load adta
     marthGames =  GamesDataSet(inputFolder)
 
+    if len(marthGames) == 0:
+        print("No games found for training. Check inputFolder.")
+        return
+
     ## make data loaders
     test_amount, val_amount = int(marthGames.__len__() * test_size), int(marthGames.__len__() * validation_size)
+    train_amount = marthGames.__len__() - (test_amount + val_amount)
+
+    if train_amount <= 0:
+        print("Not enough games for training split.")
+        return
 
     train_set, val_set, test_set = torch.utils.data.random_split(marthGames, [
-                (marthGames.__len__() - (test_amount + val_amount)), 
-                test_amount, 
+                train_amount,
+                test_amount,
                 val_amount
     ])
 
@@ -142,40 +155,12 @@ if __name__ == "__main__":
                 collate_fn=collate_fn,
                 num_workers=num_workers
     )
-    val_dataloader = torch.utils.data.DataLoader(
-                val_set,
-                batch_size=batch_size,
-                shuffle=True,
-                collate_fn=collate_fn
-    )
-    test_dataloader = torch.utils.data.DataLoader(
-                test_set,
-                batch_size=batch_size,
-                shuffle=True,
-                collate_fn=collate_fn
-    )
-
-    ### trial debug
-
-    debug_dataloader = torch.utils.data.DataLoader(
-                torch.utils.data.Subset(marthGames, [0,3,4,6]),
-                batch_size=1,
-                shuffle=True,
-                collate_fn=collate_fn,
-                num_workers=2
-    )
-
-    train_dataloader2 = torch.utils.data.DataLoader(
-                train_set,
-                batch_size=2,
-                shuffle=True,
-                collate_fn=collate_fn,
-    )
 
     # make model
-    Smash1 = Net(4,2,32).cuda()
-
-
+    use_cuda = torch.cuda.is_available()
+    Smash1 = Net(4,2,32)
+    if use_cuda:
+        Smash1 = Smash1.cuda()
 
     EPOCHS = 1000
 
@@ -184,14 +169,20 @@ if __name__ == "__main__":
     startTime = datetime.now()
     for index in range(EPOCHS):
 
-        for inputTensorBegin, targetTensorBeing in train_dataloader:
-            inputTensor = inputTensorBegin.cuda()
-            targetTensor = targetTensorBeing.cuda()
+        for batch in train_dataloader:
+            if batch is None: continue
+            inputTensorBegin, targetTensorBeing = batch
+
+            inputTensor = inputTensorBegin
+            targetTensor = targetTensorBeing
+            if use_cuda:
+                inputTensor = inputTensor.cuda()
+                targetTensor = targetTensor.cuda()
 
             currentTensor = Smash1(inputTensor)
             lossFunction = nn.MSELoss()
             loss = lossFunction(currentTensor, targetTensor)
-            loss_list.append(loss)
+            loss_list.append(loss.item())
             loss.backward()
             for p in Smash1.parameters():
                 p.data.add_(-0.001 * p.grad)
@@ -200,17 +191,16 @@ if __name__ == "__main__":
 
             if total_count % 10 == 0:
                 currentTime = datetime.now()
-                print()
-                print(str(total_count) + " in " + str(currentTime-startTime))
-                
-            if total_count % 500 == 0 :
+                print(f"{total_count} steps in {currentTime-startTime}, loss: {loss.item():.4f}")
 
+            if total_count % 500 == 0 :
                 currentTime = datetime.now()
-                print()
-                print(str(total_count) + " in " + str(currentTime-startTime))
-                print(p.grad)
-                torch.save(Smash1, "./" + str(total_count) + "_Model4.pt")
+                print(f"Checkpoint at {total_count} steps")
+                torch.save(Smash1.state_dict(), f"./model_checkpoint_{total_count}.pt")
 
                 with open("loss_list.txt", "w") as output:
                     output.write(str(loss_list))
     print("done")
+
+if __name__ == "__main__":
+    run_training()

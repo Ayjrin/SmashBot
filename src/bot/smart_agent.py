@@ -31,7 +31,7 @@ class Net(nn.Module):
         x = F.sigmoid(self.fc5(x))
         x = self.fc6(x)
         return x
-    
+
 torch.serialization.add_safe_globals([Net])
 
 class SmartAgent:
@@ -49,14 +49,28 @@ class SmartAgent:
 
     # only called during initlization
     def loadModel(self):
-        
-        newGuy = torch.load(self.modelPath, weights_only=False, map_location=torch.device("cuda")) ## was weight_only=True, but gave error
-        print(newGuy)
-        Smash2 = Net(4,2,32)
-        Smash2.load_state_dict(newGuy)
-        Smash2.eval()
-        print("Successfully Loaded")
-        return Smash2
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Loading model on {device}")
+
+        try:
+            # Load the state dict or model
+            checkpoint = torch.load(self.modelPath, weights_only=False, map_location=device)
+
+            # If it's a full model, we might just need its state dict
+            if isinstance(checkpoint, nn.Module):
+                state_dict = checkpoint.state_dict()
+            else:
+                state_dict = checkpoint
+
+            Smash2 = Net(4,2,32)
+            Smash2.load_state_dict(state_dict)
+            Smash2.to(device)
+            Smash2.eval()
+            print("Successfully Loaded")
+            return Smash2
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
 
 
     def press_x(self):
@@ -88,7 +102,7 @@ class SmartAgent:
 
         enemX = getattr(self.gamestate.players[4].position, 'x')
         enemy = getattr(self.gamestate.players[4].position, 'y')
-        
+
         return torch.tensor([ourX,ourY,enemX,enemy]).to(dtype=torch.float32)
 
     def move(self):
@@ -99,7 +113,7 @@ class SmartAgent:
         self.move_Stick(x_main, y_main)
 
 
-    
+
 
 
 ## getter and seter for gamestate
@@ -108,5 +122,3 @@ class SmartAgent:
 
     def get_gamestate(self):
         return self.gamestate
-    
-    
