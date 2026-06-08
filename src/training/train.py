@@ -1,206 +1,114 @@
-from src.utils import ab_makeData as abn
-import peppi_py as pp
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from matplotlib.pyplot import plot, xlim, ylim
-import numpy
-
-
-##
-import pandas as pd
 import os
 from datetime import datetime
 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
 
-## Global Variableds
-DATA_FOLDER = r"C:\Users\soph\PVV\Projects\Smash\shared_raw"
-gameName = r'\02_32_35 [RUDE] Marth + [INFP] Marth (BF).slp'
-test_path = DATA_FOLDER + r"\Slippi_Public_Dataset_v3" + gameName
-inputFolder = DATA_FOLDER+ r"\Slippi_Public_Dataset_v3" +r"\\cleaned\\"
+from src.model.networks import SmashNet
+from src.utils.dataset import SlippiDataset, collate_fn
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-inputColumns = ['x_pos', 'y_pos', 'x_pos.enemy', 'y_pos.enemy']
-outputColumns = ['x_joy', 'y_joy']
-enemySplitList = ['x_pos', 'y_pos', 'x_joy', 'y_joy', 'frameNumber', 'character']
-
-test_size = .15
-validation_size = .15
-batch_size = 64
-num_workers = 8
-###
-
-## functions
-
-def inputStart(dfGood, dfBad):
-   return dfGood.merge(dfBad.add_suffix(".enemy"), left_on='frameNumber', right_on='frameNumber.enemy')
-
-def customDFtoTensor(inputPath : str):
-
-    inputDF = pd.DataFrame(abn.make_pre_large(pp.read_slippi(inputPath)))
+# Hyperparameters
+INPUT_SIZE = 13
+OUTPUT_SIZE = 2  # Focusing on Joy X, Joy Y for now
+HIDDEN_SIZE = 256
+BATCH_SIZE = 1024  # Larger batches since we flatten frames
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-5
+EPOCHS = 100
+PROCESSED_DATA_DIR = "data/processed"
+MODEL_SAVE_DIR = "models"
 
 
-    Player0 = inputDF[inputDF['Player']=='0'][enemySplitList]
-    Player1 = inputDF[inputDF['Player']=='1'][enemySplitList]
+def train():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    print(f"Using device: {device}")
 
-    preFinal = pd.concat([inputStart(Player0, Player1), inputStart(Player1, Player0)])
-    preFinal['stage'] = inputDF['stage'][0]
-    preFinal = preFinal.astype('float32')
-
-    return preFinal
-
-
-class GamesDataSet(torch.utils.data.Dataset):
-    def __init__(self, image_folder, characterFilter = 'Marth'):
-        self.games_folder = image_folder
-        self.characterFilter = characterFilter
-        self.games = self.filterGames()
-
-    ## part of init
-    def filterGames(self):
-        games = []
-        if not os.path.exists(self.games_folder):
-            print(f"Warning: Folder {self.games_folder} does not exist.")
-            return []
-        for filename in os.listdir(self.games_folder):
-            if self.characterFilter in filename:
-                games.append(filename)
-        print("total games: " + str(len(games)))
-        return games
-
-    def __getitem__(self, index):
-        try:
-            pathToGame = self.games_folder + r"\\" + self.games[index]
-            if str(pathToGame).endswith('.pkl'):
-                majority_df = pd.read_pickle(pathToGame)
-            else:
-                almonstFinal = customDFtoTensor(pathToGame)
-                majority_df = almonstFinal[almonstFinal['character']==9.0]
-
-            inputTensor = torch.tensor(majority_df[inputColumns].values)
-            targetTensor = torch.tensor(majority_df[outputColumns].values)
-        except:
-            return None
-            ## details hanlded in custon collate_fn
-
-        return inputTensor, targetTensor
-
-    def __len__(self):
-        return len(self.games)
-
-
-
-## concatenating together for ease
-def collate_fn(batch):
-    batch = list(filter(lambda x: x is not None, batch))
-    if not batch:
-        return None
-
-    data = [item[0] for item in batch]
-    data = torch.cat(data, dim=0)
-    target = [item[1] for item in batch]
-    target = torch.cat(target, dim=0)
-
-    return [data, target]
-    #return torch.utils.data.dataloader.default_collate(batch)
-
-class Net(nn.Module):
-    def __init__(self, input_size, output_size, layerSize):
-        super(Net,self).__init__()
-        self.fc1 = nn.Linear(input_size, layerSize)
-        self.fc2 = nn.Linear(layerSize,layerSize)
-        self.fc3 = nn.Linear(layerSize,layerSize)
-        self.fc4 = nn.Linear(layerSize,layerSize)
-        self.fc5 = nn.Linear(layerSize,layerSize)
-        self.fc6 = nn.Linear(layerSize, output_size)
-
-    def forward(self, x):
-        x = F.sigmoid(self.fc1(x))
-        x = F.sigmoid(self.fc2(x))
-        x = F.sigmoid(self.fc3(x))
-        x = F.sigmoid(self.fc4(x))
-        x = F.sigmoid(self.fc5(x))
-        x = self.fc6(x)
-        return x
-
-
-def run_training():
-    ## load adta
-    marthGames =  GamesDataSet(inputFolder)
-
-    if len(marthGames) == 0:
-        print("No games found for training. Check inputFolder.")
+    # Load Dataset
+    full_dataset = SlippiDataset(PROCESSED_DATA_DIR)
+    if len(full_dataset) == 0:
+        print("No processed data found. Run preprocessing first.")
         return
 
-    ## make data loaders
-    test_amount, val_amount = int(marthGames.__len__() * test_size), int(marthGames.__len__() * validation_size)
-    train_amount = marthGames.__len__() - (test_amount + val_amount)
+    # Split into Train/Val
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_subset, val_subset = random_split(full_dataset, [train_size, val_size])
 
-    if train_amount <= 0:
-        print("Not enough games for training split.")
-        return
-
-    train_set, val_set, test_set = torch.utils.data.random_split(marthGames, [
-                train_amount,
-                test_amount,
-                val_amount
-    ])
-
-    train_dataloader = torch.utils.data.DataLoader(
-                train_set,
-                batch_size=batch_size,
-                shuffle=True,
-                collate_fn=collate_fn,
-                num_workers=num_workers
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=BATCH_SIZE // 16,  # subset of games, collate_fn will flatten them
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collate_fn,
+    )
+    val_loader = DataLoader(
+        val_subset,
+        batch_size=BATCH_SIZE // 16,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=collate_fn,
     )
 
-    # make model
-    use_cuda = torch.cuda.is_available()
-    Smash1 = Net(4,2,32)
-    if use_cuda:
-        Smash1 = Smash1.cuda()
+    # Initialize Model
+    model = SmashNet(INPUT_SIZE, OUTPUT_SIZE, HIDDEN_SIZE).to(device)
+    optimizer = optim.AdamW(
+        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+    )
+    criterion = nn.MSELoss()
 
-    EPOCHS = 1000
+    best_val_loss = float("inf")
 
-    loss_list = []
-    total_count = 0
-    startTime = datetime.now()
-    for index in range(EPOCHS):
+    print("Starting training...")
+    for epoch in range(EPOCHS):
+        model.train()
+        train_loss = 0.0
 
-        for batch in train_dataloader:
-            if batch is None: continue
-            inputTensorBegin, targetTensorBeing = batch
+        for inputs, targets in train_loader:
+            # We only want the first 2 columns of targets (Joy X, Joy Y)
+            targets = targets[:, :2]
 
-            inputTensor = inputTensorBegin
-            targetTensor = targetTensorBeing
-            if use_cuda:
-                inputTensor = inputTensor.cuda()
-                targetTensor = targetTensor.cuda()
+            inputs, targets = inputs.to(device), targets.to(device)
 
-            currentTensor = Smash1(inputTensor)
-            lossFunction = nn.MSELoss()
-            loss = lossFunction(currentTensor, targetTensor)
-            loss_list.append(loss.item())
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
             loss.backward()
-            for p in Smash1.parameters():
-                p.data.add_(-0.001 * p.grad)
-                p.grad.data.zero_()
-            total_count = total_count + 1
+            optimizer.step()
 
-            if total_count % 10 == 0:
-                currentTime = datetime.now()
-                print(f"{total_count} steps in {currentTime-startTime}, loss: {loss.item():.4f}")
+            train_loss += loss.item()
 
-            if total_count % 500 == 0 :
-                currentTime = datetime.now()
-                print(f"Checkpoint at {total_count} steps")
-                torch.save(Smash1.state_dict(), f"./model_checkpoint_{total_count}.pt")
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                targets = targets[:, :2]
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                val_loss += loss.item()
 
-                with open("loss_list.txt", "w") as output:
-                    output.write(str(loss_list))
-    print("done")
+        avg_train_loss = train_loss / len(train_loader)
+        avg_val_loss = val_loss / len(val_loader)
+
+        print(
+            f"Epoch [{epoch + 1}/{EPOCHS}], Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}"
+        )
+
+        # Save Best Model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            model_path = os.path.join(MODEL_SAVE_DIR, f"best_model_{timestamp}.pt")
+            torch.save(model.state_dict(), model_path)
+            print(f"Saved best model with Val Loss: {best_val_loss:.6f}")
+
 
 if __name__ == "__main__":
-    run_training()
+    if not os.path.exists(MODEL_SAVE_DIR):
+        os.makedirs(MODEL_SAVE_DIR)
+    train()
